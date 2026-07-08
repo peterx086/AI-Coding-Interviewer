@@ -354,13 +354,18 @@ def build_problem_catalog() -> List[Dict[str, object]]:
                         "Check edge cases such as empty input or maximum input sizes."
                     ],
                     "starter_code": (
-                        "def solve():\n"
-                        "    # Write your solution here\n"
-                        "    pass\n\n"
-                        "if __name__ == '__main__':\n"
-                        "    import sys\n"
-                        "    data = sys.stdin.read().strip()\n"
-                        "    print(data)\n"
+                        "from typing import List\n\n"
+                        "class Solution:\n"
+                        "    def solve(self, nums: List[int], target: int) -> List[int]:\n"
+                        "        \"\"\"\n"
+                        "        Parameters:\n"
+                        "            nums (List[int]): The input array of integers.\n"
+                        "            target (int): The target sum.\n\n"
+                        "        Example:\n"
+                        f"            Input: {template['examples'][0]['input'] if template.get('examples') else '...'}\n"
+                        f"            Output: {template['examples'][0]['output'] if template.get('examples') else '...'}\n"
+                        "        \"\"\"\n"
+                        "        pass\n"
                     ),
                     "visible_tests": template["visible_tests"],
                     "hidden_tests": template["hidden_tests"],

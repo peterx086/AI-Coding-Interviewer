@@ -1,7 +1,8 @@
 'use client';
 
 import dynamic from 'next/dynamic';
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
+import { API_BASE_URL } from '../lib/api';
 
 const MonacoEditor = dynamic(() => import('@monaco-editor/react'), { ssr: false });
 
@@ -36,12 +37,29 @@ interface ProblemDetail {
   starter_code: string;
 }
 
+interface FinishReport {
+  overall_score: number;
+  categories: { label: string; score: number; description: string }[];
+  strengths: string[];
+  weaknesses: string[];
+  suggestions: string[];
+  summary: string;
+}
+
 interface InterviewShellProps {
   problem: ProblemDetail;
 }
 
 export function InterviewShell({ problem }: InterviewShellProps) {
-  const [code, setCode] = useState(problem.starter_code || '');
+  const starterCodeForProblem = useMemo(() => {
+    if (problem.title.toLowerCase().includes('two sum')) {
+      return `from typing import List\n\nclass Solution:\n    def twoSum(self, nums: List[int], target: int) -> List[int]:\n        """\n        Parameters:\n            nums (List[int]): The input array of integers.\n            target (int): The target sum.\n\n        Example:\n            Input: nums = [2, 7, 11, 15], target = 9\n            Output: [0, 1]\n        """\n        pass\n`;
+    }
+
+    return problem.starter_code || '';
+  }, [problem]);
+
+  const [code, setCode] = useState(starterCodeForProblem);
   const [consoleLines, setConsoleLines] = useState<string[]>([]);
   const [runResults, setRunResults] = useState<TestResult[]>([]);
   const [isRunning, setIsRunning] = useState(false);
@@ -50,11 +68,23 @@ export function InterviewShell({ problem }: InterviewShellProps) {
   ]);
   const [chatInput, setChatInput] = useState('');
   const [isSubmitting, setIsSubmitting] = useState(false);
+  const [isThinking, setIsThinking] = useState(false);
   const [showHints, setShowHints] = useState(false);
-  const [finishReport, setFinishReport] = useState<null | { overall_score: number; strengths: string[]; weaknesses: string[]; suggestions: string[]; summary: string }>(null);
+  const [finishReport, setFinishReport] = useState<null | FinishReport>(null);
   const [showHiddenTests, setShowHiddenTests] = useState(false);
 
   const hintsSummary = useMemo(() => problem.hints.join(' '), [problem.hints]);
+
+  useEffect(() => {
+    setCode(starterCodeForProblem);
+    setConsoleLines([]);
+    setRunResults([]);
+    setShowHints(false);
+    setFinishReport(null);
+    setChatHistory([{ author: 'interviewer', message: 'Welcome to your interview. Please explain your approach before writing code.' }]);
+    setChatInput('');
+    setShowHiddenTests(false);
+  }, [starterCodeForProblem, problem.id]);
 
   const appendChat = (author: 'interviewer' | 'candidate', message: string) => {
     setChatHistory((history) => [...history, { author, message }]);
@@ -64,7 +94,7 @@ export function InterviewShell({ problem }: InterviewShellProps) {
     setIsRunning(true);
     setConsoleLines((lines) => [...lines, 'Running visible tests...']);
     try {
-      const response = await fetch('http://127.0.0.1:8000/run', {
+      const response = await fetch(`${API_BASE_URL}/run`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ problem_id: problem.id, code, use_hidden_tests: showHiddenTests }),
@@ -87,6 +117,7 @@ export function InterviewShell({ problem }: InterviewShellProps) {
       return;
     }
     setIsSubmitting(true);
+    setIsThinking(true);
     const candidateMessage = hint ? 'Please give me a hint.' : chatInput.trim();
     appendChat('candidate', candidateMessage);
     if (!hint) {
@@ -94,7 +125,7 @@ export function InterviewShell({ problem }: InterviewShellProps) {
     }
 
     try {
-      const response = await fetch('http://127.0.0.1:8000/chat', {
+      const response = await fetch(`${API_BASE_URL}/chat`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -114,16 +145,17 @@ export function InterviewShell({ problem }: InterviewShellProps) {
         setShowHints(true);
       }
     } catch (error) {
-      appendChat('interviewer', `Error: ${String(error)}`);
+      appendChat('interviewer', `The interviewer is unavailable right now. ${String(error)}`);
     } finally {
       setIsSubmitting(false);
+      setIsThinking(false);
     }
   };
 
   const finishInterview = async () => {
     setIsSubmitting(true);
     try {
-      const response = await fetch('http://127.0.0.1:8000/finish', {
+      const response = await fetch(`${API_BASE_URL}/finish`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -139,6 +171,7 @@ export function InterviewShell({ problem }: InterviewShellProps) {
       }
       setFinishReport({
         overall_score: data.overall_score,
+        categories: data.categories,
         strengths: data.strengths,
         weaknesses: data.weaknesses,
         suggestions: data.suggestions,
@@ -153,7 +186,7 @@ export function InterviewShell({ problem }: InterviewShellProps) {
   };
 
   return (
-    <div className="grid gap-6 xl:grid-cols-[1.1fr_0.9fr_0.8fr]">
+    <div className="grid gap-6 xl:grid-cols-[0.8fr_1.95fr_0.95fr]">
       <section className="section-card flex flex-col gap-6">
         <div className="space-y-4">
           <div className="flex items-center justify-between gap-4">
@@ -176,6 +209,25 @@ export function InterviewShell({ problem }: InterviewShellProps) {
           <div className="rounded-3xl bg-slate-950/80 p-5">
             <p className="text-sm uppercase tracking-[0.2em] text-slate-400">Output</p>
             <p className="mt-2 text-slate-300">{problem.output_description}</p>
+          </div>
+          <div className="rounded-3xl bg-slate-950/80 p-5">
+            <p className="text-sm uppercase tracking-[0.2em] text-slate-400">Input parameters</p>
+            <div className="mt-3 rounded-2xl border border-slate-800 bg-slate-900/70 p-3 text-sm text-slate-300">
+              <p className="font-medium text-white">Example signature</p>
+              <pre className="mt-2 whitespace-pre-wrap text-sm text-slate-300">{problem.title.toLowerCase().includes('two sum') ? 'def twoSum(self, nums: List[int], target: int) -> List[int]:' : 'def solve():'} </pre>
+            </div>
+          </div>
+          <div className="rounded-3xl bg-slate-950/80 p-5">
+            <p className="text-sm uppercase tracking-[0.2em] text-slate-400">Examples</p>
+            <div className="mt-3 space-y-3">
+              {problem.examples.slice(0, 2).map((example, index) => (
+                <div key={index} className="rounded-2xl border border-slate-800 bg-slate-900/70 p-3 text-sm text-slate-300">
+                  <p className="font-medium text-white">Example {index + 1}</p>
+                  <p className="mt-2"><span className="font-semibold text-slate-200">Input:</span> {example.input}</p>
+                  <p className="mt-1"><span className="font-semibold text-slate-200">Expected output:</span> {example.output}</p>
+                </div>
+              ))}
+            </div>
           </div>
           <div className="rounded-3xl bg-slate-950/80 p-5">
             <p className="text-sm uppercase tracking-[0.2em] text-slate-400">Constraints</p>
@@ -227,7 +279,7 @@ export function InterviewShell({ problem }: InterviewShellProps) {
               scrollBeyondLastLine: false,
             }}
             onChange={(value) => setCode(value || '')}
-            className="h-[520px]"
+            className="h-[840px] md:h-[900px] xl:h-[980px]"
           />
         </div>
 
@@ -269,7 +321,7 @@ export function InterviewShell({ problem }: InterviewShellProps) {
         </div>
       </section>
 
-      <section className="section-card flex flex-col gap-6">
+      <section className="section-card flex flex-col gap-6 xl:ml-2">
         <div className="flex items-center justify-between gap-4">
           <div>
             <p className="text-sm uppercase tracking-[0.2em] text-slate-400">AI interviewer</p>
@@ -287,6 +339,15 @@ export function InterviewShell({ problem }: InterviewShellProps) {
               <p className="mt-2 whitespace-pre-line text-slate-200">{item.message}</p>
             </div>
           ))}
+          {isThinking ? (
+            <div className="rounded-3xl border border-slate-800 bg-slate-900 p-4">
+              <p className="text-xs uppercase tracking-[0.2em] text-slate-500">Interviewer</p>
+              <div className="mt-2 flex items-center gap-2 text-slate-300">
+                <span className="h-2.5 w-2.5 animate-pulse rounded-full bg-sky-400" />
+                <span>Thinking…</span>
+              </div>
+            </div>
+          ) : null}
         </div>
 
         <textarea
@@ -315,20 +376,41 @@ export function InterviewShell({ problem }: InterviewShellProps) {
           <div className="rounded-3xl border border-slate-700 bg-slate-900/80 p-4 text-sm text-slate-300">
             <p className="font-semibold text-white">Interview report</p>
             <p className="mt-2">Overall score: <span className="font-semibold text-white">{finishReport.overall_score}</span></p>
-            <div className="mt-4 space-y-3">
+            <div className="mt-4 grid gap-4 xl:grid-cols-2">
               <div>
-                <p className="text-sm font-semibold text-white">Strengths</p>
-                <ul className="list-disc space-y-1 pl-5 text-slate-300">
-                  {finishReport.strengths.map((item, index) => <li key={index}>{item}</li>)}
-                </ul>
+                <p className="text-sm font-semibold text-white">Categories</p>
+                <div className="mt-3 space-y-2">
+                  {finishReport.categories.map((category, index) => (
+                    <div key={index} className="rounded-2xl bg-slate-950/80 p-3">
+                      <p className="font-medium text-slate-100">{category.label}</p>
+                      <p className="mt-1 text-sm text-slate-400">{category.description}</p>
+                      <p className="mt-2 text-sm text-slate-300">Score: <span className="font-semibold text-white">{category.score}</span></p>
+                    </div>
+                  ))}
+                </div>
               </div>
-              <div>
-                <p className="text-sm font-semibold text-white">Weaknesses</p>
-                <ul className="list-disc space-y-1 pl-5 text-slate-300">
-                  {finishReport.weaknesses.map((item, index) => <li key={index}>{item}</li>)}
-                </ul>
+              <div className="space-y-4">
+                <div>
+                  <p className="text-sm font-semibold text-white">Strengths</p>
+                  <ul className="list-disc space-y-1 pl-5 text-slate-300">
+                    {finishReport.strengths.map((item, index) => <li key={index}>{item}</li>)}
+                  </ul>
+                </div>
+                <div>
+                  <p className="text-sm font-semibold text-white">Weaknesses</p>
+                  <ul className="list-disc space-y-1 pl-5 text-slate-300">
+                    {finishReport.weaknesses.map((item, index) => <li key={index}>{item}</li>)}
+                  </ul>
+                </div>
+                <div>
+                  <p className="text-sm font-semibold text-white">Suggestions</p>
+                  <ul className="list-disc space-y-1 pl-5 text-slate-300">
+                    {finishReport.suggestions.map((item, index) => <li key={index}>{item}</li>)}
+                  </ul>
+                </div>
               </div>
             </div>
+            <p className="mt-4 text-slate-400">{finishReport.summary}</p>
           </div>
         ) : null}
       </section>
