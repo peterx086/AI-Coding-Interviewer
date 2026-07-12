@@ -1,7 +1,7 @@
 'use client';
 
 import dynamic from 'next/dynamic';
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { API_BASE_URL } from '../lib/api';
 
 const MonacoEditor = dynamic(() => import('@monaco-editor/react'), { ssr: false });
@@ -72,6 +72,9 @@ export function InterviewShell({ problem }: InterviewShellProps) {
   const [showHints, setShowHints] = useState(false);
   const [finishReport, setFinishReport] = useState<null | FinishReport>(null);
   const [showHiddenTests, setShowHiddenTests] = useState(false);
+  const [isRecording, setIsRecording] = useState(false);
+  const mediaRecorderRef = useRef<MediaRecorder | null>(null);
+  const recordedChunksRef = useRef<Blob[]>([]);
 
   const hintsSummary = useMemo(() => problem.hints.join(' '), [problem.hints]);
 
@@ -148,6 +151,66 @@ export function InterviewShell({ problem }: InterviewShellProps) {
       appendChat('interviewer', `The interviewer is unavailable right now. ${String(error)}`);
     } finally {
       setIsSubmitting(false);
+      setIsThinking(false);
+    }
+  };
+
+  const startRecording = async () => {
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      recordedChunksRef.current = [];
+      const mr = new MediaRecorder(stream);
+      mediaRecorderRef.current = mr;
+      mr.ondataavailable = (e) => {
+        if (e.data && e.data.size > 0) recordedChunksRef.current.push(e.data);
+      };
+      mr.onstop = () => {
+        const blob = new Blob(recordedChunksRef.current, { type: 'audio/webm' });
+        sendAudio(blob);
+        try {
+          stream.getTracks().forEach((t) => t.stop());
+        } catch (e) {}
+      };
+      mr.start();
+      setIsRecording(true);
+    } catch (err) {
+      appendChat('interviewer', 'Could not start audio recording: microphone permission denied or unsupported.');
+    }
+  };
+
+  const stopRecording = () => {
+    const mr = mediaRecorderRef.current;
+    if (mr && mr.state !== 'inactive') {
+      mr.stop();
+    }
+    setIsRecording(false);
+  };
+
+  const sendAudio = async (blob: Blob) => {
+    setIsThinking(true);
+    try {
+      const fd = new FormData();
+      fd.append('file', blob, 'recording.webm');
+      fd.append('session_id', `problem-${problem.id}`);
+      fd.append('problem_id', String(problem.id));
+      const resp = await fetch(`${API_BASE_URL}/speech`, {
+        method: 'POST',
+        body: fd,
+      });
+      const data = await resp.json();
+      const transcript = data.transcript || '(no transcript)';
+      const reply = data.reply || 'Interviewer did not reply.';
+      appendChat('candidate', transcript);
+      appendChat('interviewer', reply);
+      // Speak reply using browser TTS
+      try {
+        const utter = new SpeechSynthesisUtterance(reply);
+        window.speechSynthesis.cancel();
+        window.speechSynthesis.speak(utter);
+      } catch (e) {}
+    } catch (err) {
+      appendChat('interviewer', `Audio upload failed: ${String(err)}`);
+    } finally {
       setIsThinking(false);
     }
   };
@@ -357,9 +420,14 @@ export function InterviewShell({ problem }: InterviewShellProps) {
           className="h-24 min-h-[96px] resize-none rounded-3xl border border-slate-800 bg-slate-950 p-4 text-sm text-slate-100 outline-none transition focus:border-sky-500"
         />
         <div className="flex items-center justify-between gap-3">
-          <button onClick={() => submitChat(false)} disabled={isSubmitting} className="inline-flex items-center justify-center rounded-full bg-sky-500 px-5 py-3 text-sm font-semibold text-slate-950 transition hover:bg-sky-400 disabled:cursor-not-allowed disabled:opacity-50">
-            {isSubmitting ? 'Sending…' : 'Send message'}
-          </button>
+          <div className="flex items-center gap-2">
+            <button onClick={() => { if (isRecording) stopRecording(); else startRecording(); }} className={`rounded-full border border-slate-700 px-4 py-2 text-sm font-semibold transition ${isRecording ? 'bg-rose-600 text-white' : 'text-slate-200 hover:bg-slate-800/90'}`}>
+              {isRecording ? 'Stop' : 'Record'}
+            </button>
+            <button onClick={() => submitChat(false)} disabled={isSubmitting} className="inline-flex items-center justify-center rounded-full bg-sky-500 px-5 py-3 text-sm font-semibold text-slate-950 transition hover:bg-sky-400 disabled:cursor-not-allowed disabled:opacity-50">
+              {isSubmitting ? 'Sending…' : 'Send message'}
+            </button>
+          </div>
           <button onClick={finishInterview} disabled={isSubmitting} className="rounded-full border border-slate-700 px-5 py-3 text-sm text-slate-200 transition hover:bg-slate-800/90">
             Finish interview
           </button>

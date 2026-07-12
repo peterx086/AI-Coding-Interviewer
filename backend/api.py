@@ -5,7 +5,7 @@ import re
 import subprocess
 from typing import Any, Dict
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, UploadFile, File, Form
 from fastapi.middleware.cors import CORSMiddleware
 
 from .db import fetch_problem, fetch_problem_summaries, get_db_connection, initialize_database
@@ -161,31 +161,107 @@ def chat(request: ChatRequest) -> ChatResponse:
     return ChatResponse(reply=reply, stage=stage)
 
 
+@app.post("/speech")
+def speech(session_id: str = Form(...), problem_id: int = Form(...), file: UploadFile = File(...)) -> Dict[str, str]:
+    """Accept an uploaded audio clip, attempt to transcribe it (if whisper is installed),
+    then forward the transcript into the chat flow and return the transcript + interviewer reply.
+    This is a minimal POC: if no transcription backend is available, it will return a helpful message.
+    """
+    tmp_path = None
+    transcript = ""
+    try:
+        contents = file.file.read()
+        import tempfile
+
+        fd, tmp_path = tempfile.mkstemp(suffix=".audio")
+        with open(tmp_path, "wb") as fh:
+            fh.write(contents)
+
+        # Try local whisper if available
+        try:
+            import whisper
+
+            wmodel = whisper.load_model(os.getenv("WHISPER_MODEL", "small"))
+            result = wmodel.transcribe(tmp_path)
+            transcript = (result or {}).get("text", "").strip()
+        except Exception:
+            # Whisper not available or failed — fallback to empty transcript
+            transcript = ""
+
+        if not transcript:
+            transcript = "(audio uploaded — transcription not available locally)"
+
+        # Reuse chat flow to generate an interviewer reply
+        chat_req = ChatRequest(session_id=session_id, problem_id=problem_id, message=transcript)
+        chat_resp = chat(chat_req)
+        return {"transcript": transcript, "reply": chat_resp.reply}
+    finally:
+        try:
+            if tmp_path and os.path.exists(tmp_path):
+                os.remove(tmp_path)
+        except Exception:
+            pass
+
+
 @app.post("/finish", response_model=FinishResponse)
 def finish_interview(request: FinishRequest) -> FinishResponse:
     session = get_session(request.session_id)
-    passed_count = sum(1 for item in request.run_history if item.get("passed"))
-    total_count = len(request.run_history)
+    # Gather basic metrics from the provided run history (the frontend sends the latest run results)
+    passed_count = sum(1 for item in (request.run_history or []) if item.get("passed"))
+    total_count = max(1, len(request.run_history or []))
+    pass_ratio = passed_count / total_count
+
     hidden_requests = session.get("hints_requested", 0)
     clarifying_questions = session.get("clarifying_questions", 0)
 
-    score = 60 + min(20, passed_count * 5)
+    # Efficiency: average runtime across reported test results (seconds)
+    runtimes = [r.get("runtime_seconds", 0.0) for r in (request.run_history or []) if isinstance(r.get("runtime_seconds", None), (int, float))]
+    avg_runtime = sum(runtimes) / len(runtimes) if runtimes else 0.0
+
+    # Hidden tests bonus (if the candidate ran with hidden tests and passed them, reward)
+    hidden_bonus = 0
+    try:
+        hidden_passed = sum(1 for r in (request.run_history or []) if r.get("passed") and r.get("hidden", False))
+        if hidden_passed > 0:
+            hidden_bonus = min(15, hidden_passed * 5)
+    except Exception:
+        hidden_bonus = 0
+
+    # Compose score from multiple factors (0-100)
+    score = 50
+    # correctness (up to +30)
+    score += int(30 * pass_ratio)
+    # efficiency (up to +10)
+    if avg_runtime <= 0.1:
+        score += 10
+    elif avg_runtime <= 1.0:
+        score += 8
+    elif avg_runtime <= 2.0:
+        score += 5
+    elif avg_runtime <= 5.0:
+        score += 2
+    # small code quality bonus if all tests passed
+    if passed_count == total_count:
+        score += 5
+    # communication bonus
     score += min(10, clarifying_questions * 2)
-    score -= min(10, hidden_requests * 2)
-    score = max(40, min(100, score))
+    # hint penalty
+    score -= min(15, hidden_requests * 3)
+    # hidden tests bonus
+    score += hidden_bonus
 
+    score = max(0, min(100, int(score)))
+
+    # Build category-level scores (simple heuristics)
     categories = [
-        {"label": "Communication", "score": min(20, 10 + clarifying_questions * 2), "description": "Clarity of reasoning and responsiveness."},
-        {"label": "Problem solving", "score": min(25, 15 + passed_count * 2), "description": "Understanding of requirements and approach."},
-        {"label": "Code quality", "score": min(20, 12 + passed_count), "description": "Readability and maintainability of the implementation."},
-        {"label": "Testing", "score": min(20, 10 + passed_count * 2), "description": "Use of visible and hidden tests to validate the solution."},
-        {"label": "Professionalism", "score": min(15, 10 + max(0, clarifying_questions - hidden_requests)), "description": "How thoughtfully the candidate handled the interview conversation."},
+        {"label": "Communication", "score": min(20, 8 + clarifying_questions * 2), "description": "Clarity of reasoning and responsiveness."},
+        {"label": "Problem solving", "score": min(30, 10 + int(20 * pass_ratio)), "description": "Understanding of requirements and approach."},
+        {"label": "Code quality", "score": min(20, 8 + (5 if passed_count == total_count else 0)), "description": "Readability and maintainability of the implementation."},
+        {"label": "Testing", "score": min(20, 8 + int(12 * pass_ratio) + (hidden_bonus // 3)), "description": "Use of visible and hidden tests to validate the solution."},
+        {"label": "Professionalism", "score": min(10, 5 + max(0, clarifying_questions - hidden_requests)), "description": "How thoughtfully the candidate handled the interview conversation."},
     ]
 
-    strengths = [
-        "You showed strong engagement with the interview questions.",
-        "You used test execution to validate your solution.",
-    ]
+    strengths = ["You used test execution to validate your solution."]
     weaknesses = []
     suggestions = []
 
@@ -193,8 +269,8 @@ def finish_interview(request: FinishRequest) -> FinishResponse:
         weaknesses.append("Some test cases did not pass. Review failing cases and edge conditions.")
         suggestions.append("Rerun the code after fixing the specific failing inputs.")
     if hidden_requests > 0:
-        weaknesses.append("You requested hints, which is fine, but try to solve more independently next time.")
-        suggestions.append("Use hint requests sparingly and aim to develop your own solution first.")
+        weaknesses.append("You requested hints; try to solve more independently when possible.")
+        suggestions.append("Use hint requests sparingly and attempt your own solution first.")
     if clarifying_questions == 0:
         weaknesses.append("You could ask more clarifying questions before coding.")
         suggestions.append("Ask about constraints, input sizes, and edge-case behavior during the interview.")
@@ -213,9 +289,16 @@ def finish_interview(request: FinishRequest) -> FinishResponse:
     ollama_model = os.getenv("OLLAMA_MODEL")
     if ollama_enabled and ollama_model:
         try:
+            # try to get a readable problem title for context
+            conn = get_db_connection()
+            try:
+                p = fetch_problem(conn, request.problem_id)
+                problem_title = p["title"] if isinstance(p, dict) else (p.title if p else str(request.problem_id))
+            finally:
+                conn.close()
             run_summary = json.dumps(request.run_history or [])
             prompt = (
-                f"You are an experienced interview coach. Problem: {problem.title if 'problem' in locals() else request.problem_id}.\n"
+                f"You are an experienced interview coach. Problem: {problem_title}.\n"
                 f"Run history: {run_summary}\n"
                 f"Current summary: {summary}\n"
                 "Provide one short additional suggestion and one short strength note, separated by a blank line."
